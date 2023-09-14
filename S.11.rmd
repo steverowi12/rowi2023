@@ -1,0 +1,2564 @@
+---
+title: "Fungal - Final"
+author: "Steve Rowe"
+date: "01/11/2021"
+output: html_document
+---
+
+# Loading packages
+```{r include=FALSE}
+
+library(pheatmap)
+library(vegan)
+library(ellipse)
+library(Glimma)
+library(DESeq2)
+library(phyloseq)
+library(matrixStats)
+library(agricolae)
+library(beeswarm)
+library(gdata)       
+library(ade4)        
+library(cowplot)
+library(DESeq2)
+library(htmltools)
+library(agricolae)   
+library(lmerTest)    
+require(multcomp)    
+require(MuMIn)       
+library(Cairo)      
+library(graphics)    
+library(lubridate)   
+library(data.table)  
+library(tidyverse)   
+library(ggrepel)     
+library(knitr)
+library(rmarkdown)
+library(Hmsc)
+library(ape)
+library(phangorn)
+library(indicspecies)
+library(ggpubr)
+library(RColorBrewer)
+library(plotly)
+library(microbiome)
+library(phylosmith)
+library(ggbeeswarm)
+library(microViz)
+library(picante)
+library(microbiomeutilities) # some utility tools 
+library(DT) # interactive tables in html and markdown
+library(data.table) # alternative to data.frame
+
+
+```
+
+# Phyloseq
+
+# Loading and formatting data
+```{r}
+
+### OTU TABLE
+######### Read in OTU table
+bac.otu.tab = read.csv("data/raw/combined_fungi_otu_table.csv", header=F, stringsAsFactors=F) 
+######### Change first column name to 'samplename'
+bac.otu.tab[1, 1]= "samplename"
+######### Change column names to first row 
+colnames(bac.otu.tab) = bac.otu.tab[1,]
+######### Remove first row
+bac.otu.tab = bac.otu.tab[-1,]
+######### Read as data frame
+bac.otu.tab <- as.data.frame(bac.otu.tab)
+
+
+### TAX TABLE
+######### Read in taxonomy table
+bac.tax.tab = read.csv("data/raw/combined_fungi_tax_table.csv", header=F, stringsAsFactors=F)
+######### Change first column name to 'samplename'
+bac.tax.tab[1, 1]= "samplename"
+######### Change column names to first row 
+colnames(bac.tax.tab) = bac.tax.tab[1,]
+######### Remove first row
+bac.tax.tab = bac.tax.tab[-1,]
+
+
+######### Checks that OTUs in the OTU table and TAX table match, excludes others
+bac.tax.tabsub = bac.tax.tab[(bac.tax.tab$samplename %in% bac.otu.tab$samplename),]
+######### Joins the new TAX table and OTU table together
+bacteria = left_join(bac.tax.tabsub, bac.otu.tab)
+######### Writes this joined table as a file in the root directory
+#write.csv(bacteria, "otu-bac-combo-2.csv")
+
+
+
+######### Separates the file as the first column, and columns 8-553 (samples)
+bacteria.otu = bacteria[,c(1,9:ncol(bacteria))]
+######### Writes this new separated file into the root directory
+write.csv(bacteria.otu, "bacOTU.csv")
+######### Separates the file as columns 1-9 only (taxonomies)
+bacteria.tax = bacteria[,c(1:8)]
+######### Writes this new separated file into the root directory
+write.csv(bacteria.tax, "bacTAX.csv")
+
+
+
+######### Reads both of the new files in as matrices - OTU and TAX
+bacOTU_kiwi <- as.matrix((read_csv("bacOTU.csv", col_names=T, show_col_types = F)[,-1])) 
+bacTAX_kiwi <- as.matrix((read_csv("bacTAX.csv", col_names=T, show_col_types = F)[,-1])) 
+######### Changes the first column IDs to OTU(n)
+rownames(bacOTU_kiwi) <- paste0("OTU", 1:nrow(bacOTU_kiwi))
+rownames(bacTAX_kiwi) <- paste0("OTU", 1:nrow(bacTAX_kiwi))
+
+
+
+######### Reads in sample data as a data frame
+sampledata_kiwi <- data.frame(read_csv("data/final/combined_sample_data_caps1.csv", show_col_types = F))
+######### Changes first column values to the same values under column 'submit form code'
+row.names(sampledata_kiwi) <- sampledata_kiwi$submit_form_code
+
+
+
+### PHYLOSEQ OBJECTS
+######### Formatting
+bacOTU_kiwi <- bacOTU_kiwi[, -1]
+class(bacOTU_kiwi) <- "numeric"
+bacTAX_kiwi <- bacTAX_kiwi[, -1]
+
+######### Creating otu_table, tax_table and sampledata phyloseq objects
+OTU_kiwi <- otu_table(bacOTU_kiwi, taxa_are_rows=T)
+TAX_kiwi <- tax_table(bacTAX_kiwi)
+SAM_kiwi <- sample_data(sampledata_kiwi)
+
+######### First iteration of combined phyloseq object
+bacterial_dataset_total <- phyloseq(OTU_kiwi, TAX_kiwi, SAM_kiwi)
+
+######### Removes all OTUs that fall under the column (Phylum) of 'Cyanobacteria/Chloroplast', to remove plant DNA
+phyla <- as.vector(data.frame(tax_table(bacterial_dataset_total))$Phylum)
+phyla <- (!(phyla%in%c("Cyanobacteria/Chloroplast")))
+phyla[is.na(phyla)]=FALSE
+bacterial_dataset=prune_taxa(phyla, bacterial_dataset_total)
+
+######### Removes all OTUs that fall under the column (Domain) of 'Bacteria', to remove any bacteria 
+phyla <- as.vector(data.frame(tax_table(bacterial_dataset))$Domain)
+phyla <- (!(phyla%in%c("Bacteria")))
+phyla[is.na(phyla)]=FALSE
+bacterial_dataset=prune_taxa(phyla, bacterial_dataset)
+
+######### Removes all OTUs that fall under the column (Phylum) of 'Plantae', to remove plant DNA
+phyla <- as.vector(data.frame(tax_table(bacterial_dataset))$Phylum)
+phyla <- (!(phyla%in%c("Plantae")))
+phyla[is.na(phyla)]=FALSE
+bacterial_dataset=prune_taxa(phyla, bacterial_dataset)
+
+######### Remove all 'empty' and 'negative control' samples as per SD column 'what'
+actual <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+actual <- (!(actual%in%c("empty", "negative_control")))
+actual[is.na(actual)]=FALSE
+bacterial_dataset=prune_samples(actual, bacterial_dataset)
+
+######### Removes all uncharacterised phlyum OTUs from subset "bacterial_dataset"
+bacterial_dataset <- subset_taxa(bacterial_dataset, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
+
+######### Reorder by life_stage_cohort
+sample_data(bacterial_dataset)$life_stage_cohort <- factor((sample_data(bacterial_dataset)$life_stage_cohort), levels=c("Control - Hatchery","Control - Transitionary","Treatment - Transitionary","Control - Runs","Treatment - Runs","Control - Late","Control - Wild", "Okarito soil", "Willowbank soil", "Willowbank straw", "Willowbank peat moss", "Willowbank swab"))
+
+```
+
+## Phylogenetic Tree
+```{r}
+
+### PHYLOSEQ TREE
+######### Generating a tree in phyloseq
+
+
+########## Read FASTA file from RDP output in
+#fun.seq = read.FASTA("combined_fungi_taxa_final.fasta", type = "DNA")
+######### Move to PhyDat format
+#fun.phydat = phyDat(fun.seq, type = "DNA", levels = NULL)
+######### Make ML-UPGMA tree - WILL TAKE SOME TIME TO RUN THROUGH TREE TYPES
+#fun.mt = modelTest(fun.phydat)
+#print(fun.mt)
+#dm = dist.ml(fun.phydat)
+#treeUPGMA = upgma(dm)
+#phy_tree(fungal_dataset) = treeUPGMA
+#write.tree(treeUPGMA, "ITS_tree")
+tree_fun=read.tree("ITS_tree")
+#########create phyloseq tree object
+phy_tree(bacterial_dataset)=tree_fun
+
+```
+
+# Growth Rates - Raw data
+```{r}
+
+######## Load packages
+library(ggpubr)
+library(ggExtra)
+
+######## Subset by environmental samples 
+soil <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soil <- (!(soil%in%c("kiwi_poo")))
+soil[is.na(soil)]=FALSE
+soil.bac <- prune_samples(soil, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by life_stage - no hatchery samples
+growth <- as.vector(data.frame(sample_data(poodata.bac))$life_stage)
+growth <- growth%in%c("Transitionary", "Runs")
+growth[is.na(growth)]=FALSE
+growth.bac <- prune_samples(growth, poodata.bac)
+
+######## Remove NA's from weight column
+no_NAs <- as.vector(data.frame(sample_data(growth.bac))$weight)
+no_NAs <-  (!(no_NAs%in%c(NA)))
+no_NAs[is.na(no_NAs)]=FALSE
+growth.bac <- prune_samples(no_NAs, growth.bac)
+
+######## Read as numeric
+growth.bac@sam_data$weight <- as.numeric(as.character(growth.bac@sam_data$weight))
+
+######## Scatterplot using ggplot2
+p <- ggplot(growth.bac@sam_data, aes(x=average_age, y=weight, color=cohort_actual)) + scale_colour_discrete("Cohort") + scale_shape_discrete("Cohort") +
+    geom_point(size = 3) + geom_smooth(method = "glm", se=F) + scale_y_continuous("Weight") + scale_x_continuous("Age") + ggtitle("Growth Rate of Control vs Treatment Rowi") 
+
+######## Extract sample data from growth.bac to use as raw data frame
+growth.bac_sample_data <- as.data.frame(growth.bac@sam_data)
+
+######## Scatterplot using extraced sample data and GGPubr
+ggscatter(growth.bac_sample_data, x='average_age', y='weight',
+          color = "cohort_actual", shape = 21, size = 3, # Points color, shape and size
+   add = "reg.line",  # Add regression line
+   add.params = list(color = "cohort_actual", fill = "cohort_actual"), # Customize reg. line
+   conf.int = TRUE, # Add confidence interval
+   cor.coef = TRUE, # Add correlation coefficient. see ?stat_cor
+   cor.coeff.args = list(method = "pearson", label.x = 3, label.sep = "\n")
+   )
+
+
+
+p <- ggscatter(growth.bac_sample_data, x='average_age', y='weight',
+          color = "cohort_actual", shape = 21, size = 3, fill = "cohort_actual")
+
+library(cowplot) 
+
+pmain <- ggplot(growth.bac@sam_data, aes(x=average_age, y=weight, color=cohort_actual)) + scale_colour_discrete("Cohort") + scale_shape_discrete("Cohort") +
+    geom_point(size = 3) + geom_smooth(method = "glm", se=F) + scale_y_continuous("Weight") + scale_x_continuous("Age") + ggtitle("Growth Rate of Control vs Treatment Rowi") + ggpubr::color_palette("jco")
+
+# Main plot
+pmain <- ggplot(growth.bac@sam_data, aes(x=average_age, y=weight, color=cohort_actual)) + scale_colour_discrete("Cohort") + scale_shape_discrete("Cohort") +
+    geom_point(size = 3) + geom_smooth(method = "glm", se=F) + scale_y_continuous("Weight") + scale_x_continuous("Age") + ggtitle("Growth Rate of Control vs Treatment Rowi") + ggpubr::color_palette("jco")
+
+
+######### Full scatterplot of GROWTH RATE including densities on axes - Control vs Treatment, Age x Weight
+
+pmain <- ggscatter(growth.bac_sample_data, x='average_age', y='weight',
+          color = "cohort_actual", shape = 21, size = 3, fill = "cohort_actual", palette = "jco",
+          xlab = "Age (days)", ylab = "Weight (g)", title = "Growth Rate of Control vs Treatment Rowi",
+   add = "reg.line",  # Add regression line
+   add.params = list(color = "cohort_actual", fill = "cohort_actual"), # Customize reg. line
+   conf.int = F, # Add confidence interval
+   cor.coef = F, # Add correlation coefficient. see ?stat_cor
+   cor.coeff.args = list(method = "pearson", label.x = 3, label.sep = "\n")
+
+   )
+
+pmain_labelled <- ggpar(pmain, legend.title = "Cohort")
+
+# Marginal densities along x axis
+xdens <- axis_canvas(pmain_labelled, axis = "x")+
+  geom_density(data = growth.bac@sam_data, aes(x = average_age, fill = cohort_actual),
+              alpha = 0.7, size = 0.2) +
+  ggpubr::fill_palette("jco")
+# Marginal densities along y axis
+# Need to set coord_flip = TRUE, if you plan to use coord_flip()
+ydens <- axis_canvas(pmain_labelled, axis = "y", coord_flip = TRUE)+
+  geom_density(data = growth.bac@sam_data, aes(x = weight, fill = cohort_actual),
+                alpha = 0.7, size = 0.2)+
+  coord_flip() +
+  ggpubr::fill_palette("jco")
+p1 <- insert_xaxis_grob(pmain_labelled, xdens, grid::unit(.2, "null"), position = "top")
+p2<- insert_yaxis_grob(p1, ydens, grid::unit(.2, "null"), position = "right")
+ggdraw(p2)
+
+
+
+######### Full scatterplot of GROWTH RATE including densities on axes - Antifungal_history positive vs negative, Age x Weight
+
+pmain2 <- ggscatter(growth.bac_sample_data, x='average_age', y='weight',
+          color = "antifungal_history", shape = 21, size = 3, fill = "antifungal_history", palette = "jco",
+          xlab = "Age (days)", ylab = "Weight (g)", title = "Antifungal Exposure vs Growth Rate in Rowi",
+   add = "reg.line",  # Add regression line
+   add.params = list(color = "antifungal_history", fill = "antifungal_history"), # Customize reg. line
+   conf.int = F, # Add confidence interval
+   cor.coef = F, # Add correlation coefficient. see ?stat_cor
+   cor.coeff.args = list(method = "pearson", label.x = 3, label.sep = "\n")
+
+   )
+
+pmain_labelled2 <- ggpar(pmain2, legend.title = "Antifungal exposure")
+
+# Marginal densities along x axis
+xdens <- axis_canvas(pmain_labelled2, axis = "x")+
+  geom_density(data = growth.bac@sam_data, aes(x = average_age, fill = cohort_actual),
+              alpha = 0.7, size = 0.2) +
+  ggpubr::fill_palette("jco")
+# Marginal densities along y axis
+# Need to set coord_flip = TRUE, if you plan to use coord_flip()
+ydens <- axis_canvas(pmain_labelled2, axis = "y", coord_flip = TRUE)+
+  geom_density(data = growth.bac@sam_data, aes(x = weight, fill = cohort_actual),
+                alpha = 0.7, size = 0.2)+
+  coord_flip() +
+  ggpubr::fill_palette("jco")
+p3 <- insert_xaxis_grob(pmain_labelled2, xdens, grid::unit(.2, "null"), position = "top")
+p4<- insert_yaxis_grob(p3, ydens, grid::unit(.2, "null"), position = "right")
+ggdraw(p4)
+
+```
+
+# ANOVA of Growth scatterplot regression lines
+```{r}
+
+library(lsmeans)
+
+weights_data <- data.frame(read_csv("samplesheet_subsample_weights_controlvstreatment.csv", show_col_types = F))
+
+
+
+m.interaction <- (lm(weight ~ average_age*cohort_actual, data = weights_data))
+anova(m.interaction)
+
+# Obtain slopes
+m.interaction$coefficients
+m.lst <- lstrends(m.interaction, "cohort_actual", var="average_age")
+
+# Compare slopes
+pairs(m.lst)
+
+
+library(psych)
+library(data.table)
+
+weights_data <- as.data.table(weights_data)
+# Calculate Pearson's R
+m.correlations <- weights_data[, cor(weight, average_age), by = cohort_actual]
+m.correlations
+# Compare R values with Fisher's R to Z
+paired.r(m.correlations[cohort_actual=="Control", V1], m.correlations[cohort_actual=="Treatment", V1], 
+         n = weights_data[cohort_actual %in% c("Control", "Treatment"), .N])
+
+
+```
+# Preprocessing and Tree - kiwi
+
+```{r}
+
+myTaxa = names(sort(taxa_sums(bacterial_dataset), decreasing = TRUE)[1:100])
+ex1 = prune_taxa(myTaxa, bacterial_dataset)
+plot_tree(ex1, ladderize="left", plot.margin = 0.1, color="Phylum")
+
+GPr  = transform_sample_counts(bacterial_dataset, function(x) x / sum(x) )
+GPnew = filter_taxa(bacterial_dataset, function(x) sum(x > 1) > (0.001*length(x)), TRUE)
+
+gpsfbg = tax_glom(GPnew, "Order")
+gpsfbg  = transform_sample_counts(gpsfbg, function(x) x / sum(x) )
+
+soil_runs_wild <- subset_samples(gpsfbg, life_stage_cohort=="Control - Hatchery" | life_stage_cohort== "Control - Transitionary" | life_stage_cohort== "Control - Runs" | life_stage_cohort== "Treatment - Transitionary" | life_stage_cohort== "Treatment - Runs")
+
+plot_tree(soil_runs_wild, color="life_stage_cohort", size="abundance", justify = "yes please", ladderize = "left") +
+  scale_size_continuous(range = c(1, 3))
+
+
+sdt = data.table(as(sample_data(bacterial_dataset), "data.frame"),
+                 TotalReads = sample_sums(bacterial_dataset), keep.rownames = TRUE)
+pSeqDepth = ggplot(sdt, aes(TotalReads)) + geom_histogram() + ggtitle("Sequencing Depth")
+pSeqDepth + theme_bw()
+
+pSeqDepth + facet_wrap(~what) + theme_bw()
+
+
+```
+
+# Preprocessing and Tree - soil
+
+```{r}
+
+myTaxa = names(sort(taxa_sums(bacterial_dataset), decreasing = TRUE)[1:25])
+ex1 = prune_taxa(myTaxa, bacterial_dataset)
+plot_tree(phy_tree(ex1), label.tips = "taxa_names", plot.margin = 0.5)
+
+GPr  = transform_sample_counts(bacterial_dataset, function(x) x / sum(x) )
+GPnew = filter_taxa(bacterial_dataset, function(x) sum(x > 1) > (0.001*length(x)), TRUE)
+
+gpsfbg = tax_glom(GPnew, "Order")
+gpsfbg  = transform_sample_counts(gpsfbg, function(x) x / sum(x) )
+
+soil_runs_wild <- subset_samples(gpsfbg, life_stage_cohort=="Okarito soil" | life_stage_cohort== "Willowbank soil" | life_stage_cohort== "Willowbank swab" | life_stage_cohort== "Willowbank straw" | life_stage_cohort== "Willowbank peat moss")
+
+plot_tree(soil_runs_wild, color="life_stage_cohort", size="abundance", justify = "yes please", ladderize = "left") +
+  scale_size_continuous(range = c(1, 3))
+
+
+sdt = data.table(as(sample_data(bacterial_dataset), "data.frame"),
+                 TotalReads = sample_sums(bacterial_dataset), keep.rownames = TRUE)
+pSeqDepth = ggplot(sdt, aes(TotalReads)) + geom_histogram() + ggtitle("Sequencing Depth")
+pSeqDepth + theme_bw()
+
+pSeqDepth + facet_wrap(~what) + theme_bw()
+
+
+```
+
+
+# Statistics of read coverage across samples
+```{r}
+######## Stats - all
+max(sample_sums(bacterial_dataset))
+mean(sample_sums(bacterial_dataset))
+range(sample_sums(bacterial_dataset))
+sample_sums(bacterial_dataset)
+hist(sample_sums(bacterial_dataset), breaks = 100,col = "blue", main = "Histogram of sample sequencing depth")
+
+######## Stats - kiwi poo
+max(sample_sums(poodata.bac))
+mean(sample_sums(poodata.bac))
+range(sample_sums(poodata.bac))
+sample_sums(poodata.bac)
+hist(sample_sums(poodata.bac), breaks = 100,col = "blue", main = "Histogram of sample sequencing depth")
+
+######## Stats - soil
+max(sample_sums(soil.bac))
+mean(sample_sums(soil.bac))
+range(sample_sums(soil.bac))
+sample_sums(soil.bac)
+hist(sample_sums(soil.bac), breaks = 100,col = "blue", main = "Histogram of sample sequencing depth")
+
+######## Library distribution, coloured by 'what'
+df = as.data.frame(sample_data(bacterial_dataset))
+df$LibrarySize = sample_sums(bacterial_dataset)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= what))+
+  geom_point()
+
+######## Library distribution - poo, coloured by 'life_stage'
+df = as.data.frame(sample_data(poodata.bac))
+df$LibrarySize = sample_sums(poodata.bac)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= life_stage))+
+  geom_point()
+
+######## Library distribution - soil, coloured by 'what'
+df = as.data.frame(sample_data(soil.bac))
+df$LibrarySize = sample_sums(soil.bac)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= site))+
+  geom_point()
+
+```
+
+## Alpha diversity with tree measures
+```{r}
+
+bacterial_dataset.100 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=100, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+
+######## Poo only 
+fb_ratios <- as.vector(data.frame(sample_data(bacterial_dataset.100))$what)
+fb_ratios <- (fb_ratios%in%c("kiwi_poo"))
+fb_ratios[is.na(fb_ratios)]=FALSE
+poo.bac <- prune_samples(fb_ratios, bacterial_dataset.100)
+
+
+p.rar <- plot_taxa_prevalence(poo.bac, "Order")
+
+p.rar
+
+
+######## Soil only 
+fb_ratios <- as.vector(data.frame(sample_data(bacterial_dataset.100))$what)
+fb_ratios <- (fb_ratios%in%c("environmental_soil", "environmental_substrate", "environmental_swab"))
+fb_ratios[is.na(fb_ratios)]=FALSE
+soil.bac <- prune_samples(fb_ratios, bacterial_dataset.100)
+
+
+p.rar <- plot_taxa_prevalence(soil.bac, "Order")
+
+p.rar
+
+
+```
+
+
+## Phylogenetic diversity - Rowi
+
+```{r}
+
+
+######## Poo only 
+fb_ratios <- as.vector(data.frame(sample_data(bacterial_dataset.100))$what)
+fb_ratios <- (fb_ratios%in%c("kiwi_poo"))
+fb_ratios[is.na(fb_ratios)]=FALSE
+poo.bac <- prune_samples(fb_ratios, bacterial_dataset.100)
+
+
+poo.bac.asvtab <- as.data.frame(poo.bac@otu_table)
+
+poo.bac.tree <- poo.bac@phy_tree
+
+hmp.meta <- meta(poo.bac)
+
+# hmp.meta from previous code chunks
+
+# We first need to check if the tree is rooted or not 
+
+poo.bac@phy_tree
+
+df.pd <- pd(t(poo.bac.asvtab), poo.bac.tree,include.root=T) # t(ou_table) transposes the table for use in picante and the tre file comes from the first code chunck we used to read tree file (see making a phyloseq object section).
+
+
+datatable(df.pd)
+
+hmp.meta$Phylogenetic_Diversity <- df.pd$PD
+
+#Plot
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.1, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+
+pd.plot <- ggboxplot(hmp.meta,
+  x = "life_stage_cohort",
+  y = "Phylogenetic_Diversity",
+  fill = "life_stage_cohort",
+  palette = "Dark2",
+  ylab = "Phylogenetic Diversity",
+  xlab = "Life Stage, Cohort and Soil Type",
+  legend = "right"
+)
+pd.plot <- pd.plot + rotate_x_text()
+
+pd.plot + stat_compare_means(
+  comparisons = a_my_comparisons,
+  method = "wilcox.test",
+  label = "p.signif",
+  symnum.args = symnum.args
+)
+
+```
+
+## Phylogenetic diversity - Soils
+
+```{r}
+
+######## Soil only 
+fb_ratios <- as.vector(data.frame(sample_data(bacterial_dataset.100))$what)
+fb_ratios <- (fb_ratios%in%c("environmental_soil", "environmental_substrate", "environmental_swab"))
+fb_ratios[is.na(fb_ratios)]=FALSE
+soil.bac <- prune_samples(fb_ratios, bacterial_dataset.100)
+
+
+
+soil.bac.asvtab <- as.data.frame(soil.bac@otu_table)
+
+soil.bac.tree <- soil.bac@phy_tree
+
+hmp.meta <- meta(soil.bac)
+
+# hmp.meta from previous code chunks
+
+# We first need to check if the tree is rooted or not 
+
+soil.bac@phy_tree
+
+df.pd <- pd(t(soil.bac.asvtab), soil.bac.tree,include.root=T) # t(ou_table) transposes the table for use in picante and the tre file comes from the first code chunck we used to read tree file (see making a phyloseq object section).
+
+
+datatable(df.pd)
+
+hmp.meta$Phylogenetic_Diversity <- df.pd$PD
+
+##Plot
+
+a_my_comparisons <- list( c("Okarito soil", "Willowbank soil"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.1, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+
+pd.plot <- ggboxplot(hmp.meta,
+  x = "life_stage_cohort",
+  y = "Phylogenetic_Diversity",
+  fill = "life_stage_cohort",
+  palette = "Dark2",
+  ylab = "Phylogenetic Diversity",
+  xlab = "Life Stage, Cohort and Soil Type",
+  legend = "right"
+)
+pd.plot <- pd.plot + rotate_x_text()
+
+pd.plot + stat_compare_means(
+  comparisons = a_my_comparisons,
+  method = "wilcox.test",
+  label = "p.format",
+)
+
+```
+
+# Fungal Abundance Plots
+
+### microViz - All kiwi and soil
+
+```{r}
+
+
+######## Subset by CH, CT, TT, CR, TR, WWR and Okarito 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$life_stage_cohort)
+poo <- poo%in%c("Control - Hatchery", "Control - Transitionary", "Control - Runs", "Treatment - Transitionary", "Treatment - Runs", "Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+############1
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_outline_colour = NA, sample_order = "default", facet_by = "life_stage_cohort"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+####################3
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+  comp_barplot(tax_level = "Order", sample_order = "default", n_taxa = 15, bar_outline_colour = 'grey5', order_with_all_taxa = T) +
+  facet_grid(
+    rows = vars(life_stage_cohort), 
+    scales = "free", space = "free" # these options are critically important!
+  ) +
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+```
+
+### microViz - All kiwi
+
+```{r}
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(poodata.bac))$life_stage_cohort)
+poo <- poo%in%c("Control - Hatchery", "Control - Transitionary", "Control - Runs", "Treatment - Transitionary", "Treatment - Runs")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, poodata.bac)
+
+############1
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_outline_colour = NA, sample_order = "default", facet_by = "life_stage_cohort"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+#pdf(file="Plots/15.pdf")
+
+####################3
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+  comp_barplot(tax_level = "Order", sample_order = "default", n_taxa = 15, bar_outline_colour = 'grey5', order_with_all_taxa = T) +
+  facet_grid(
+    rows = vars(life_stage_cohort), 
+    scales = "free", space = "free" # these options are critically important!
+  ) +
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+#dev.off()
+
+```
+
+### microViz - Transitionary kiwi
+
+```{r}
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(poodata.bac))$life_stage_cohort)
+poo <- poo%in%c("Control - Transitionary", "Treatment - Transitionary")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, poodata.bac)
+
+############1
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_outline_colour = NA, sample_order = "default", facet_by = "life_stage_cohort"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+####################3
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+  comp_barplot(tax_level = "Order", sample_order = "default", n_taxa = 15, bar_outline_colour = 'grey5', order_with_all_taxa = T) +
+  facet_grid(
+    rows = vars(life_stage_cohort), 
+    scales = "free", space = "free" # these options are critically important!
+  ) +
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+```
+
+### microViz - Runs kiwi
+
+```{r}
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(poodata.bac))$life_stage_cohort)
+poo <- poo%in%c("Control - Runs", "Treatment - Runs")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, poodata.bac)
+
+############1
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_outline_colour = NA, sample_order = "default", facet_by = "life_stage_cohort"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+####################3
+
+#pdf(file="Plots/15.pdf")
+
+poodata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+  comp_barplot(tax_level = "Order", sample_order = "default", n_taxa = 15, bar_outline_colour = 'grey5', order_with_all_taxa = T) +
+  facet_grid(
+    rows = vars(life_stage_cohort), 
+    scales = "free", space = "free" # these options are critically important!
+  ) +
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+
+#dev.off()
+
+
+```
+
+### microViz - Soils
+
+```{r}
+
+######## Subset by soil only 
+soil <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soil <- (!(soil%in%c("kiwi_poo")))
+soil[is.na(soil)]=FALSE
+soil.bac <- prune_samples(soil, bacterial_dataset)
+
+######## Subset by soil only 
+soil <- as.vector(data.frame(sample_data(soil.bac))$life_stage_cohort)
+soil <- soil%in%c("Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw")
+soil[is.na(soil)]=FALSE
+soildata.bac <- prune_samples(soil, soil.bac)
+
+############1
+soildata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_outline_colour = NA, sample_order = "default", facet_by = "life_stage_cohort"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+#pdf(file="Plots/17.pdf")
+
+####################3
+soildata.bac %>% 
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>% 
+  comp_barplot(tax_level = "Order", sample_order = "default", n_taxa = 15, bar_outline_colour = 'grey5', order_with_all_taxa = T) +
+  facet_grid(
+    rows = vars(life_stage_cohort), 
+    scales = "free", space = "free" # these options are critically important!
+  ) +
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+#dev.off()
+
+```
+
+# Control vs Treatment All Birds
+```{r}
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(poodata.bac))$life_stage_cohort)
+poo <- (!(poo%in%c("Control - Late", "Control - Wild")))
+poo[is.na(poo)]=FALSE
+no.wild.late.bac <- prune_samples(poo, poodata.bac)
+
+######## Setting order for categories
+newlocationorder <- c("Control - Hatchery", "Control - Transitionary", "Control - Runs", "Treatment - Transitionary", "Treatment - Runs")
+
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"))
+
+#pdf(file="Plots/16.pdf")
+
+
+no.wild.late.bac %>%
+  phyloseq::merge_samples(group = "life_stage_cohort") %>%
+  comp_barplot(
+    tax_level = "Order", n_taxa = 12,
+    bar_width = 0.8,
+    sample_order = newlocationorder
+  ) 
+
+#dev.off()
+
+
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+poo <- poo%in%c("kiwi_poo")
+poo[is.na(poo)]=FALSE
+poodata.bac <- prune_samples(poo, bacterial_dataset)
+
+######## Subset by poo only, no environmental samples 
+poo <- as.vector(data.frame(sample_data(poodata.bac))$life_stage_cohort)
+poo <- (!(poo%in%c("Control - Late", "Control - Wild")))
+poo[is.na(poo)]=FALSE
+no.wild.late.bac <- prune_samples(poo, poodata.bac)
+
+######## Phylum of all poo subset samples filtered at 3% 
+poo_Phylum <- no.wild.late.bac %>%
+  tax_glom(taxrank = "Order") %>%                     # agglomerate at tax level
+  transform_sample_counts(function(x){x/sum(x)}) %>%   # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.25) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)                                      # Sort data frame alphabetically by Phylum
+
+
+######## Setting order for categories
+newlocationorder <- c("Control - Hatchery", "Control - Transitionary", "Control - Runs", "Treatment - Transitionary", "Treatment - Runs")
+poo_Phylum$life_stage_cohort <- reorder.factor(poo_Phylum$life_stage_cohort, new.order=newlocationorder)
+
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.1, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+
+######## Bar Plot of Control vs Treatment Birds
+ggplot(poo_Phylum, aes(x=life_stage_cohort, y=Abundance, fill=Order)) + 
+   stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.format") +
+  #facet_grid(cohort_actual~.) + 
+  geom_bar(stat="identity", position="fill") + theme_classic() +
+  #scale_fill_manual(values = Phylum_colors) +
+  theme(axis.title.x=element_blank()) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(reverse=F, keywidth=1, keyheight=1)) +
+  ylab("Relative Abundance (Phyla > 3%) \n") +
+  ggtitle("Fungal Order Composition of Control and Treatment Rowi by Life Stage")
+
+
+```
+
+
+# Comparison of Okarito vs Willowbank soils and substrates vs Wild Kiwi
+```{r}
+
+######## Subset by soil only 
+soil <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soil <- (!(soil%in%c("kiwi_poo")))
+soil[is.na(soil)]=FALSE
+soil.bac <- prune_samples(soil, bacterial_dataset)
+
+######## Subset by soil only 
+soil <- as.vector(data.frame(sample_data(soil.bac))$life_stage_cohort)
+soil <- soil%in%c("Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw")
+soil[is.na(soil)]=FALSE
+soildata.bac <- prune_samples(soil, soil.bac)
+
+
+
+
+######## Setting order for categories
+newlocationorder <- c("Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw")
+
+
+soildata.bac %>%
+  phyloseq::merge_samples(group = "life_stage_cohort") %>%
+  comp_barplot(
+    tax_level = "Order", n_taxa = 15,
+    bar_width = 0.8,
+    sample_order = newlocationorder
+  ) 
+
+
+
+######## Subset by soils and substrates only, no poo samples 
+soils <- as.vector(data.frame(sample_data(bacterial_dataset))$life_stage_cohort)
+soils <- soils%in%c("Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw", "Willowbank swab")
+soils[is.na(soils)]=FALSE
+soils_substrates <- prune_samples(soils, bacterial_dataset)
+
+######## Phylum of all poo subset samples filtered at 3% 
+soil_Phylum <- soils_substrates %>%
+  tax_glom(taxrank = "Order") %>%                     # agglomerate at tax level
+  transform_sample_counts(function(x){x/sum(x)}) %>%   # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.03) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)                                      # Sort data frame alphabetically by Phylum
+
+
+######## Setting order for categories
+newlocationorder <- c("Control - Wild", "Okarito soil", "Willowbank soil", "Willowbank peat moss", "Willowbank straw", "Willowbank swab")
+soil_Phylum$life_stage_cohort <- reorder.factor(soil_Phylum$life_stage_cohort, new.order=newlocationorder)
+
+
+a_my_comparisons <- list( c("Okarito soil", "Willowbank soil"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.1, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+
+######## Bar Plot of Control vs Treatment Birds
+ggplot(soil_Phylum, aes(x=life_stage_cohort, y=Abundance, fill=Order)) + 
+   stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.format") +
+  #facet_grid(cohort_actual~.) + 
+  geom_bar(stat="identity", position="fill") + theme_classic() +
+  #scale_fill_manual(values = Phylum_colors) +
+  theme(axis.title.x=element_blank()) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(reverse=F, keywidth=1, keyheight=1)) +
+  ylab("Relative Abundance (Phyla > 3%) \n") +
+  ggtitle("Fungal Phylum Composition of Soils and Substrates vs Wild Brown Kiwi")
+
+
+
+```
+################################
+#################################
+# Comparison of Antifungal Positive vs Negative Birds by Runs Stage
+```{r}
+
+
+
+######## Subset by antibiotics exposure from poodata.bac
+antibiotics <- as.vector(data.frame(sample_data(bacterial_dataset))$antifungal_history)
+antibiotics <- antibiotics%in%c("positive", "negative")
+antibiotics[is.na(antibiotics)]=FALSE
+antibiotics_exposure<- prune_samples(antibiotics, bacterial_dataset)
+
+## removing late life stage
+no.late <- as.vector(data.frame(sample_data(antibiotics_exposure))$life_stage)
+no.late <- (!(no.late%in%c("Late", "Hatchery", "Transitionary")))
+no.late[is.na(no.late)]=FALSE
+antibiotics_exposure=prune_samples(no.late, antibiotics_exposure)
+
+#pdf(file="Plots/32.pdf")
+
+
+antibiotics_exposure %>%
+  tax_agg("Order") %>% 
+  ps_arrange(desc(Malasseziales), .target = "otu_table") %>%
+  comp_barplot(
+    tax_level = "Order", n_taxa = 30,
+    bar_outline_colour = 'grey5',
+    bar_width = 0.8,
+    sample_order = "default"
+  )  +
+  facet_grid(
+    rows = vars(cohort_actual, antifungal_history),
+    scales = "free", space = "free") + # these options are critically important!
+  coord_flip() + 
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+
+#dev.off()
+
+
+######## Subset by antifungal exposure from poodata.bac
+antifungal <- as.vector(data.frame(sample_data(bacterial_dataset))$antifungal_history)
+antifungal <- antifungal%in%c("positive", "negative")
+antifungal[is.na(antifungal)]=FALSE
+antifungal_exposure<- prune_samples(antifungal, bacterial_dataset)
+
+## removing late life stage
+no.late <- as.vector(data.frame(sample_data(antifungal_exposure))$life_stage)
+no.late <- (!(no.late%in%c("Late")))
+no.late[is.na(no.late)]=FALSE
+antifungal_exposure=prune_samples(no.late, antifungal_exposure)
+
+######## Phylum of all poo subset samples filtered at 3% 
+antifungal_Phylum <- antifungal_exposure %>%
+  tax_glom(taxrank = "Order") %>%                     # agglomerate at tax level
+  transform_sample_counts(function(x){x/sum(x)}) %>%   # Transform to rel. abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.25) %>%                         # Filter out low abundance taxa
+  arrange(Phylum)                                      # Sort data frame alphabetically by Phylum
+
+######## Setting order for categories
+newlocationorder <- c("Hatchery", "Transitionary", "Runs")
+antifungal_Phylum$life_stage <- reorder.factor(antifungal_Phylum$life_stage, new.order=newlocationorder)
+
+
+######## Bar Plot of Antibiotics Positive vs Negative Birds
+ggplot(antifungal_Phylum, aes(x=life_stage, y=Abundance, fill=Order)) + 
+  facet_grid(antifungal_history~.) + 
+  geom_bar(stat="identity", position="fill") + theme_classic() +
+  #scale_fill_manual(values = Phylum_colors) +
+  theme(axis.title.x=element_blank()) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = guide_legend(reverse=F, keywidth=1, keyheight=1)) +
+  ylab("Relative Abundance (Phyla > 3%) \n") +
+  ggtitle("Fungal Phylum Composition of Antifungal Positive vs Negative Birds by Life Stage")
+
+
+```
+
+# Shannon Diversity Plots
+
+
+## Change in alpha diversity of control vs treatment overall
+```{r}
+
+######## Subset for plot
+poo <- as.vector(data.frame(sample_data(bacterial_dataset))$cohort_actual)
+poo <- poo%in%c("Control", "Treatment", "Wild")
+poo[is.na(poo)]=FALSE
+poodata.bac.controlvstreatment <- prune_samples(poo, bacterial_dataset)
+
+######## Subset for plot
+poo <- as.vector(data.frame(sample_data(poodata.bac.controlvstreatment))$life_stage_cohort)
+poo <- (!(poo%in%c("Control - Late")))
+poo[is.na(poo)]=FALSE
+poodata.bac.controlvstreatment <- prune_samples(poo, poodata.bac.controlvstreatment)
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"), c("Control - Transitionary", "Treatment - Transitionary"), c("Control - Wild", "Treatment - Runs"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+
+######## Alpha diversity plot
+plot_richness(poodata.bac.controlvstreatment, x = "life_stage_cohort", color = "cohort_actual", measures = c("Shannon")) +  stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args)
+
+
+
+######## Subset by control vs treatment birds from poodata.bac
+control_vs_treatment_kiwi <- as.vector(data.frame(sample_data(poodata.bac))$cohort)
+control_vs_treatment_kiwi <- control_vs_treatment_kiwi%in%c("Treatment", "Control")
+control_vs_treatment_kiwi[is.na(control_vs_treatment_kiwi)]=FALSE
+control_vs_treatment<- prune_samples(control_vs_treatment_kiwi, poodata.bac)
+
+# Plot alpha diversity indices for control vs treatment birds
+alpha_diversity_control_vs_treatment<- plot_richness(control_vs_treatment, x="average_age",  measures=c("Shannon"))
+
+######## Change in alpha diversity of control vs treatment over time
+ggplot(alpha_diversity_control_vs_treatment$data, aes(average_age, value, group=cohort, color=cohort)) +
+  geom_point(size=2) + scale_x_continuous(limits=c(0, 160)) + 
+   #stat_ellipse(aes(col=cohort_actual), size = 1) +
+  theme_classic() + geom_smooth(method="lm", se=F, aes(group=cohort)) 
+
+```
+
+
+## Change in alpha diversity of antifungal positive vs negative birds over time
+```{r}
+
+######## Subset AGAIN by antifungal exposure from poodata.bac, but with 'NA's removed
+antibiotics_kiwi <- as.vector(data.frame(sample_data(poodata.bac))$antifungal_history)
+antibiotics_kiwi <- antibiotics_kiwi%in%c("positive", "negative")
+antibiotics_kiwi[is.na(antibiotics_kiwi)]=FALSE
+antibiotics_kiwi.data<- prune_samples(antibiotics_kiwi, poodata.bac)
+
+######## Subset AGAIN by runs
+antibiotics_kiwi <- as.vector(data.frame(sample_data(antibiotics_kiwi.data))$life_stage)
+antibiotics_kiwi <- antibiotics_kiwi%in%c("Runs")
+antibiotics_kiwi[is.na(antibiotics_kiwi)]=FALSE
+antibiotics_kiwi.data<- prune_samples(antibiotics_kiwi, antibiotics_kiwi.data)
+
+######## Subset AGAIN by age
+antibiotics_kiwi <- as.vector(data.frame(sample_data(antibiotics_kiwi.data))$average_age)
+antibiotics_kiwi <- (!(antibiotics_kiwi%in%NA))
+antibiotics_kiwi[is.na(antibiotics_kiwi)]=FALSE
+antibiotics_kiwi.data<- prune_samples(antibiotics_kiwi, antibiotics_kiwi.data)
+
+
+# Plot alpha diversity indices for control vs treatment birds by cohousing status
+alpha_diversity_antibiotics<- plot_richness(antibiotics_kiwi.data, x="average_age",  measures=c("Shannon"))
+
+######## Change in alpha diversity of control vs treatment over time, coloured by cohousing pairs
+ggplot(alpha_diversity_antibiotics$data, aes(average_age, value, group=antifungal_history, color=antifungal_history)) +
+  geom_point(size=2) + scale_x_continuous(limits=c(0, 160)) + 
+   #stat_ellipse(aes(col=cohort_actual), size = 1) +
+  theme_classic() + geom_smooth(method="lm", se=F, aes(colour=antifungal_history)) 
+
+
+```
+
+
+# Rarefaction
+```{r}
+
+## Statistics of read coverage across samples
+
+######## Stats
+max(sample_sums(bacterial_dataset))
+range(sample_sums(bacterial_dataset))
+sample_sums(bacterial_dataset)
+hist(sample_sums(bacterial_dataset), breaks = 100,col = "blue", main = "Histogram of sample sequencing depth")
+
+######## Library distribution, coloured by 'what'
+df = as.data.frame(sample_data(bacterial_dataset))
+df$LibrarySize = sample_sums(bacterial_dataset)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= what))+
+  geom_point()
+
+######## Rank abundance plot 
+barplot(sort(taxa_sums(bacterial_dataset),T,)[1:100],las=2,cex.axis=.7,ylab="No. Sequences", xlab="OTU",cex=0.5,
+        main="Rank Abundance Plot for Top 100 OTUs")
+
+######## Rarefaction curves | transpose OTU table so vegan can read
+otu_transpose <- t(otu_table(bacterial_dataset)) # 
+rarecurve(otu_transpose, step=100, label=F, col="#35978f", las=1)
+abline(v=100, col="black", lty="dotted")
+abline(v=200, col="black", lty="dashed")
+abline(v=500, col="black", lty="dotdash")
+
+######## The most abundant OTUs within all samples - BACTERIA
+common.taxa.bac <- sort(taxa_sums(bacterial_dataset),T)
+common.taxa.bac <- tax_table(bacterial_dataset)[names(common.taxa.bac[1:50])]
+common.taxa.bac
+
+######## Rarefaction to different abundances
+
+#bacterial_dataset.10 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=10, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.20 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=20, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.30 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=30, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.40 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=40, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.50 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=50, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+bacterial_dataset.100 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=100, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.150 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=150, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+#bacterial_dataset.200 <- rarefy_even_depth(physeq=bacterial_dataset, sample.size=200, rngseed=7, replace=F, trimOTUs=T, verbose=T)
+
+#bacterial_dataset
+#bacterial_dataset.10
+#bacterial_dataset.20
+#bacterial_dataset.30
+#bacterial_dataset.40
+#bacterial_dataset.50
+#bacterial_dataset.100
+#bacterial_dataset.150
+#bacterial_dataset.200
+
+# Rarefaction at 100 is the optimum level - most OTUs vs samples conserved for downstream analyses
+
+```
+
+## Alpha diversity - rowi
+```{r}
+
+
+######## Subset by poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(bacterial_dataset))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Okarito soil", "Willowbank soil", "Control - Late", "Control - Wild", "Willowbank straw", "Willowbank peat moss", "Willowbank swab")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, bacterial_dataset)
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"), c("Control - Transitionary", "Treatment - Transitionary"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+######## Alpha diversity plots
+alpha_diversity_graph(soils.and.kiwi, index = 'shannon', treatment = c("cohort_actual", "life_stage"), subset = c("Treatment", "Control"), colors = 'default') +   geom_violin(width=1, size=1, alpha=0.4) + 
+  stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args)
+
+#pdf(file="Plots/22.pdf")
+
+plot_richness(soils.and.kiwi, x="life_stage_cohort", measures="Shannon", color = "cohort_actual")+
+  geom_boxplot(alpha=0.6)+ 
+  theme(legend.position="right", legend.key.size = unit(2, 'cm'), axis.text.x=element_text(angle=90,hjust=1,vjust=1,size=12))+ theme_bw() +
+  #stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.format", symnum.args = symnum.args) 
+  scale_color_brewer(palette = "Dark2")
+
+#dev.off()
+
+richness <- estimate_richness(bacterial_dataset@otu_table, measures = "Shannon")
+richness
+
+hist(richness$Shannon, main="Shannon index", xlab="")
+
+anova.sh = aov(richness$Shannon ~ sample_data(bacterial_dataset)$life_stage_cohort)
+summary(anova.sh)
+
+TukeyHSD(anova.sh)
+
+pwt <- pairwise.wilcox.test(richness$Shannon, sample_data(bacterial_dataset)$life_stage_cohort, p.adj = "bonf")
+pwt
+
+
+
+```
+
+## Alpha diversity - by Soils
+```{r}
+
+
+######## Subset by poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("kiwi_poo")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, bacterial_dataset)
+
+a_my_comparisons <- list( c("Okarito soil", "Willowbank soil"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+######## Alpha diversity plots
+alpha_diversity_graph(soils.and.kiwi, index = 'shannon', treatment = c("life_stage_cohort"), subset = c("Okarito soil", "Willowbank soil"), colors = 'default') +   geom_violin(width=1, size=1, alpha=0.4) + 
+  stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args)
+
+#pdf(file="Plots/23.pdf")
+
+plot_richness(soils.and.kiwi, x="life_stage_cohort", measures="Shannon", color = "life_stage_cohort")+
+  geom_boxplot(alpha=0.6)+ 
+  theme(legend.position="right", legend.key.size = unit(2, 'cm'), axis.text.x=element_text(angle=90,hjust=1,vjust=1,size=12))+ theme_bw() +
+  stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.format") + scale_color_brewer(palette = "Dark2")
+
+#dev.off()
+
+richness <- estimate_richness(bacterial_dataset@otu_table, measures = "Shannon")
+richness
+
+hist(richness$Shannon, main="Shannon index", xlab="")
+
+anova.sh = aov(richness$Shannon ~ sample_data(bacterial_dataset)$life_stage_cohort)
+summary(anova.sh)
+
+TukeyHSD(anova.sh)
+
+pwt <- pairwise.wilcox.test(richness$Shannon, sample_data(bacterial_dataset)$life_stage_cohort, p.adj = "bonf")
+pwt
+
+
+```
+
+## Alpha Diversity - Antifungal
+```{r}
+
+
+######## Subset by poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soils.and.kiwi <- soils.and.kiwi%in%c("kiwi_poo")
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, bacterial_dataset)
+
+######## Subset by poo samples 
+antifungals <- as.vector(data.frame(sample_data(soils.and.kiwi))$life_stage)
+antifungals <- antifungals%in%c("Runs")
+antifungals[is.na(antifungals)]=FALSE
+soils.and.kiwi <- prune_samples(antifungals, soils.and.kiwi)
+
+######## Subset by poo samples 
+antifungals <- as.vector(data.frame(sample_data(soils.and.kiwi))$antifungal_history)
+antifungals <- (!(antifungals%in%c(NA)))
+antifungals[is.na(antifungals)]=FALSE
+soils.and.kiwi <- prune_samples(antifungals, soils.and.kiwi)
+
+
+
+
+a_my_comparisons <- list( c("negative", "positive"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+######## Alpha diversity plots
+alpha_diversity_graph(soils.and.kiwi, index = 'shannon', treatment = c("cohort_actual", "life_stage"), subset = c("Treatment", "Control"), colors = 'default') +   geom_violin(width=1, size=1, alpha=0.4) + 
+  stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args)
+
+#pdf(file="Plots/22.pdf")
+
+plot_richness(soils.and.kiwi, x="antifungal_history", measures="Shannon", color = "cohort_actual")+
+  geom_boxplot(alpha=0.6)+ 
+  theme(legend.position="right", legend.key.size = unit(2, 'cm'), axis.text.x=element_text(angle=90,hjust=1,vjust=1,size=12))+ theme_bw() +
+  #stat_compare_means(method = "wilcox.test", comparisons = a_my_comparisons, label = "p.format") +
+  scale_color_brewer(palette = "Dark2")
+
+#dev.off()
+
+richness <- estimate_richness(bacterial_dataset@otu_table, measures = "Shannon")
+richness
+
+hist(richness$Shannon, main="Shannon index", xlab="")
+
+anova.sh = aov(richness$Shannon ~ sample_data(bacterial_dataset)$life_stage_cohort)
+summary(anova.sh)
+
+TukeyHSD(anova.sh)
+
+pwt <- pairwise.wilcox.test(richness$Shannon, sample_data(bacterial_dataset)$life_stage_cohort, p.adj = "bonf")
+pwt
+
+
+
+```
+
+# Heatmap and Phylum composition bar chart - runs
+```{r}
+
+######## Subset to remove soils and substrates
+bird_names <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+bird_names <- bird_names%in%c("kiwi_poo")
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bacterial_dataset)
+
+
+######## Subset to remove control - late samples
+bird_names <- as.vector(data.frame(sample_data(bird_names.data))$life_stage_cohort)
+bird_names <- (!(bird_names%in%c("Control - Late", 'Control - Wild')))
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bird_names.data)
+
+######## Sort by top ten most abundant taxa
+OTUnames10 = names(sort(taxa_sums(bird_names.data), TRUE)[1:200])
+GP10 = prune_taxa(OTUnames10, bird_names.data)
+
+
+abundance_heatmap(GP10, classification = "Phylum", treatment = c("cohort_actual", "life_stage"), transformation = 'log', colors = 'default')
+
+GP10t <- microbiome::transform(GP10, "log10")
+plot_heatmap(GP10, "NMDS", "bray", "life_stage_cohort", "Order", sample.order = "life_stage_cohort")
+
+merged <- merge_samples(GP10, "life_stage_cohort")
+phylogeny_profile(GP10, classification = 'Phylum', treatment = c("cohort_actual", "life_stage"), merge = T, relative_abundance = TRUE) + theme() 
+
+
+```
+
+# Heatmap and Phylum composition bar chart - antifungals
+```{r}
+
+######## Subset to remove soils and substrates
+bird_names <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+bird_names <- bird_names%in%c("kiwi_poo")
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bacterial_dataset)
+
+
+######## Subset to remove control - late samples
+bird_names <- as.vector(data.frame(sample_data(bird_names.data))$life_stage)
+bird_names <- bird_names%in%c("Runs")
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bird_names.data)
+
+######## Sort by top ten most abundant taxa
+OTUnames10 = names(sort(taxa_sums(bird_names.data), TRUE)[1:105])
+GP10 = prune_taxa(OTUnames10, bird_names.data)
+
+
+abundance_heatmap(GP10, classification = "Phylum", treatment = c("antifungal_history", "life_stage"), transformation = 'log', colors = 'default')
+
+GP10t <- microbiome::transform(GP10, "log10")
+plot_heatmap(GP10, "NMDS", "bray", "antifungal_history", "Genus", sample.order = "antifungal_history")
+
+merged <- merge_samples(GP10, "life_stage_cohort")
+phylogeny_profile(GP10, classification = 'Order', treatment = c("antifungal_history", "life_stage_cohort"), merge = T, relative_abundance = TRUE) + theme() 
+
+
+```
+
+# Heatmap and Phylum composition bar chart - soil
+```{r}
+
+######## Subset by birds with names
+bird_names <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+bird_names <- (!(bird_names%in%"kiwi_poo"))
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bacterial_dataset)
+
+######## Subset by birds with names
+bird_names <- as.vector(data.frame(sample_data(bird_names.data))$life_stage_cohort)
+bird_names <- (!(bird_names%in%c()))
+bird_names[is.na(bird_names)]=FALSE
+bird_names.data <- prune_samples(bird_names, bird_names.data)
+
+
+######## Sort by top ten most abundant taxa
+OTUnames10 = names(sort(taxa_sums(bird_names.data), TRUE)[1:50])
+GP10 = prune_taxa(OTUnames10, bird_names.data)
+
+
+abundance_heatmap(GP10, classification = "Genus", treatment = c("life_stage_cohort"), transformation = 'log', colors = 'default')
+
+GP10t <- microbiome::transform(GP10, "log10")
+plot_heatmap(GP10t, "NMDS", "bray", "life_stage_cohort", "Genus", sample.order = "life_stage_cohort")
+
+merged <- merge_samples(GP10, "life_stage_cohort")
+phylogeny_profile(GP10, classification = 'Phylum', treatment = c("life_stage_cohort"), merge = T, relative_abundance = TRUE) 
+
+
+
+```
+
+
+## NMDS
+
+## Wild Kiwi vs soils
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset.100, taxrank = "Family")
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Treatment - Hatchery", "Control - Transitionary", "Control - Late", "Control - Hatchery", "Willowbank straw", "Willowbank peat moss", "Willowbank swab", "Control - Runs", "Treatment - Runs")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('life_stage_cohort'), method = "bray", circle = TRUE, verbose = T)
+
+
+```
+
+## All Runs Rowi and Wild Kiwi vs soils
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset.100, taxrank = "Family")
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Treatment - Hatchery", "Control - Transitionary", "Control - Late", "Control - Hatchery", "Willowbank straw", "Willowbank peat moss", "Willowbank swab")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_042")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('life_stage_cohort'), method = "bray", circle = TRUE, verbose = T)
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('life_stage_cohort'), method = "bray", circle = TRUE, verbose = T) + facet_wrap(~life_stage_cohort)
+
+
+
+
+```
+
+## All Hatchery Rowi vs soils
+```{r}
+
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset, "log10")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Treatment - Runs", "Control - Transitionary", "Control - Late", "Control - Wild", "Control - Runs", "Willowbank straw", "Willowbank peat moss", "Willowbank swab")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_042")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+
+#pdf(file="Plots/21.pdf")
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('site', 'life_stage'), method = "bray", circle = TRUE, verbose = T)
+
+#dev.off()
+
+```
+
+## All rowi vs wild kiwi
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset.100, taxrank = "Genus")
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset rowi and kiwi samples 
+kiwi <- as.vector(data.frame(sample_data(log10))$what)
+kiwi <- kiwi%in%c("kiwi_poo")
+kiwi[is.na(kiwi)]=FALSE
+kiwi <- prune_samples(kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_042", "AG0699_rowi_166")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, kiwi)
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('cohort_actual'), method = "bray", circle = TRUE, verbose = T)
+
+
+
+```
+
+## Soils and substrates
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils <- as.vector(data.frame(sample_data(log10))$what)
+soils <- soils%in%c("environmental_soil", "environmental_substrate", "environmental_swab")
+soils[is.na(soils)]=FALSE
+soils_substrates <- prune_samples(soils, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils_substrates))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_008")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils_substrates)
+
+#pdf(file="Plots/18.pdf")
+                                 
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, c('life_stage_cohort'), method = "bray", circle = TRUE, verbose = T)
+
+#dev.off()
+
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="life_stage_cohort") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$life_stage_cohort, sampledata)
+
+```
+
+## Soils and substrates vs Control and Treatment Runs
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset.100, taxrank = "Genus")
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Transitionary", "Control - Late", "Control - Wild")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+                     
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_008", "AG0699_rowi_042")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = TRUE, verbose = T)
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="life_stage_cohort") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$life_stage_cohort, sampledata)
+
+```
+
+
+## Soils and substrates vs Control and Treatment Transitionary
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset.100, taxrank = "Genus")
+
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Runs", "Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Runs", "Control - Late", "Control - Wild")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_166", "AG0699_rowi_134")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+#pdf(file="Plots/20.pdf")
+                      
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = TRUE, verbose = T)
+
+#dev.off()
+
+```
+
+## Hatchery vs Control vs Treatment Transitionary
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+
+######## Log 10 transformation of data
+log10 <- microbiome::transform(bacterial_dataset_glom, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Late", "Control - Wild", "Willowbank soil", "Control - Runs", "Treatment - Runs", "Okarito soil")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_253", "AG0699_rowi_166", "AG0699_rowi_134", "AG0699_rowi_006", "AG0699_rowi_150", "AG0699_rowi_152", "AG0699_rowi_038")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+                                     
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = TRUE, verbose = T)
+
+
+```
+
+## Control vs Treatment Transitionary and Runs
+```{r}
+
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log transform data
+log10 <- microbiome::transform(bacterial_dataset_glom, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Late", "Control - Wild", "Willowbank soil", "Control - Transitionary", "Treatment - Transitionary", "Okarito soil")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_126", "AG0699_rowi_042", "AG0699_rowi_209", "AG0699_rowi_127", "AG0699_rowi_093")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+                                     
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = TRUE, verbose = T)
+
+
+```
+
+## Soils and substrates vs Control and Treatment Runs
+```{r}
+
+######## Agglomerate by Phylum
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log transform data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by life_stage_cohort 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Transitionary", "Control - Late", "Control - Wild")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_042", "AG0699_rowi_048", "AG0699_rowi_097", "AG0699_rowi_209", "AG0699_rowi_093", "AG0699_rowi_127", "AG0699_rowi_253")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+#pdf(file="Plots/19.pdf")
+
+                                     
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = 0.95, verbose = TRUE)
+
+#dev.off()
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="life_stage_cohort") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$life_stage_cohort, sampledata)
+
+```
+
+## Control and Treatment Runs
+```{r}
+
+######## Agglomerate by Phylum
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log transform data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by life_stage_cohort 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Transitionary", "Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Transitionary", "Control - Late", "Control - Wild", "Okarito soil", "Willowbank soil")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_042", "AG0699_rowi_048", "AG0699_rowi_097", "AG0699_rowi_209", "AG0699_rowi_093", "AG0699_rowi_127", "AG0699_rowi_253")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+                                     
+######## NMDS with bray
+nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = 0.95, verbose = TRUE)
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="cohort_actual") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$cohort_actual, sampledata)
+
+```
+
+## Control and Treatment Transitionary
+```{r}
+
+######## Agglomerate by Phylum
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log transform data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by life_stage_cohort 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Treatment - Runs", "Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Runs", "Control - Late", "Control - Wild", "Okarito soil", "Willowbank soil")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_042", "AG0699_rowi_048", "AG0699_rowi_097", "AG0699_rowi_209", "AG0699_rowi_093", "AG0699_rowi_127", "AG0699_rowi_253", "AG0699_rowi_006","AG0699_rowi_134", "AG0699_rowi_166")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+
+                                     
+######## NMDS with bray
+cvst_transitionary <- nmds_phyloseq(soils.and.kiwi2, treatment = 'life_stage_cohort', method = "bray", circle = 0.95, verbose = TRUE)
+cvst_transitionary
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="cohort_actual") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$cohort_actual, sampledata)
+
+```
+
+## Runs - Antifungals - Runs
+```{r}
+
+######## Agglomerate by Phylum
+bacterial_dataset_glom <- tax_glom(bacterial_dataset, taxrank = "Genus")
+
+######## Log transform data
+log10 <- microbiome::transform(bacterial_dataset_glom, "log10")
+
+######## Subset by life_stage_cohort 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage)
+soils.and.kiwi <- soils.and.kiwi%in%c("Runs")
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+######## Subset to remove outliers 
+soils.and.kiwi1 <- as.vector(data.frame(sample_data(soils.and.kiwi))$submit_form_code)
+soils.and.kiwi1 <- (!(soils.and.kiwi1%in%c("AG0699_rowi_042", "AG0699_rowi_048", "AG0699_rowi_097", "AG0699_rowi_209", "AG0699_rowi_093", "AG0699_rowi_127", "AG0699_rowi_253", "AG0699_rowi_006","AG0699_rowi_134", "AG0699_rowi_166")))
+soils.and.kiwi1[is.na(soils.and.kiwi1)]=FALSE
+soils.and.kiwi2 <- prune_samples(soils.and.kiwi1, soils.and.kiwi)
+                                     
+######## NMDS with bray
+w <- nmds_phyloseq(soils.and.kiwi2, treatment = 'antifungal_history', method = "bray", circle = 0.95, verbose = TRUE)
+
+w.data <- w$data
+
+
+
+######## PCoA plot using bray as distance
+bray_dist = phyloseq::distance(soils.and.kiwi2, method="bray", weighted=F)
+ordination = ordinate(soils.and.kiwi2, method="PCoA", distance=bray_dist)
+plot_ordination(soils.and.kiwi2, ordination, color="antifungal_history") + theme(aspect.ratio=1)
+sampledata <- as(sample_data(soils.and.kiwi2),"data.frame")
+
+######## PERMANOVA
+adonis2(bray_dist ~ sampledata$antifungal_history, sampledata)
+
+#pdf(file="Plots/31.pdf")
+
+w
+
+#dev.off()
+
+```
+
+
+
+
+## SIMPER using DESeq2 - kiwi
+```{r}
+
+######## SUBSET - just control and treatment birds, no wild, no hatchery, no soil
+just.kiwi <- as.vector(data.frame(sample_data(bacterial_dataset))$life_stage_cohort)
+just.kiwi <- (!(just.kiwi%in%c("Willowbank straw", "Willowbank swab", "Willowbank peat moss", "Control - Hatchery", "Control - Late", "Control - Wild", "Okarito soil", "Willowbank soil")))
+just.kiwi[is.na(just.kiwi)]=FALSE
+just.kiwi <- prune_samples(just.kiwi, bacterial_dataset)
+
+otu_table(just.kiwi) = otu_table(just.kiwi) +1
+
+
+just.kiwi.deseq = phyloseq_to_deseq2(just.kiwi, ~ cohort_actual)
+just.kiwi.deseq = DESeq(just.kiwi.deseq, test="Wald", fitType="parametric")
+
+
+res = results(just.kiwi.deseq, cooksCutoff = FALSE)
+alpha = 0.1
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(just.kiwi)[rownames(sigtab), ], "matrix"))
+
+#pdf(file="Plots/27.pdf")
+
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+}
+# Phylum order
+x = tapply(sigtab$log2FoldChange, sigtab$Order, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Phylum = factor(as.character(sigtab$Order), levels=names(x))
+# Genus order
+x = tapply(sigtab$log2FoldChange, sigtab$Species, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Species = factor(as.character(sigtab$Species), levels=names(x))
+ggplot(sigtab, aes(x=Species, y=log2FoldChange, color=Order)) + geom_point(size=4) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+#dev.off()
+
+```
+
+## SIMPER using DESeq2 - soils
+```{r}
+
+######## SUBSET - just control and treatment birds, no wild, no hatchery, no soil
+just.soils <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+just.soils <- (!(just.soils%in%c("kiwi_poo")))
+just.soils[is.na(just.soils)]=FALSE
+just.soils <- prune_samples(just.soils, bacterial_dataset)
+
+otu_table(just.soils) = otu_table(just.soils) +1
+
+
+just.soils.deseq = phyloseq_to_deseq2(just.soils, ~ life_stage_cohort)
+just.soils.deseq = DESeq(just.soils.deseq, test="Wald", fitType="parametric")
+
+
+res = results(just.soils.deseq, cooksCutoff = FALSE)
+alpha = 0.000001
+sigtab = res[which(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(just.soils)[rownames(sigtab), ], "matrix"))
+
+
+#pdf(file="Plots/28.pdf")
+
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+}
+# Phylum order
+x = tapply(sigtab$log2FoldChange, sigtab$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Phylum = factor(as.character(sigtab$Phylum), levels=names(x))
+# Family order
+x = tapply(sigtab$log2FoldChange, sigtab$Genus, function(x) max(x))
+x = sort(x, TRUE)
+sigtab$Genus = factor(as.character(sigtab$Genus), levels=names(x))
+ggplot(sigtab, aes(x=Genus, y=log2FoldChange, color=Order)) + geom_point(size=4) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+
+#dev.off()
+
+```
+
+## Network - All
+```{r}
+
+log10 <- microbiome::transform(bacterial_dataset, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("Control - Wild", "Control - Transitionary", "Control - Late", "Treatment - Transitionary", "Control - Hatchery")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+ig <- make_network(soils.and.kiwi, max.dist=0.8)
+plot_network(ig, soils.and.kiwi, color="life_stage_cohort", line_weight=0.4, label=NULL) + color_palette('Set2')
+
+plot_net(soils.and.kiwi, distance = "bray", color = "life_stage_cohort", type="samples", laymeth = "svd")  + color_palette('Set2')
+
+
+
+```
+
+## Network - Soils
+```{r}
+
+log10 <- microbiome::transform(bacterial_dataset, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+soils.and.kiwi <- as.vector(data.frame(sample_data(log10))$what)
+soils.and.kiwi <- (!(soils.and.kiwi%in%c("kiwi_poo")))
+soils.and.kiwi[is.na(soils.and.kiwi)]=FALSE
+soils.and.kiwi <- prune_samples(soils.and.kiwi, log10)
+
+ig <- make_network(soils.and.kiwi, max.dist=0.8)
+plot_network(ig, soils.and.kiwi, color="life_stage_cohort", line_weight=0.4, label=NULL) + color_palette('Set2')
+
+plot_net(soils.and.kiwi, distance = "bray", color = "life_stage_cohort", type="samples", laymeth = "svd")  + color_palette('Set2')
+
+
+
+```
+
+## Network - Kiwi runstage
+```{r}
+
+log10 <- microbiome::transform(bacterial_dataset, "compositional")
+
+######## Subset by soils and substrates only, no poo samples 
+just_kiwi <- as.vector(data.frame(sample_data(log10))$life_stage_cohort)
+just_kiwi <- (!(just_kiwi%in%c("Okarito soil", "Willowbank swab", "Willowbank soil", "Willowbank straw", "Willowbank peat moss", "Control - Hatchery", "Control - Transitionary", "Treatment - Transitionary", "Control - Late")))
+just_kiwi[is.na(just_kiwi)]=FALSE
+just_kiwi <- prune_samples(just_kiwi, log10)
+
+ig <- make_network(just_kiwi, max.dist=0.8)
+plot_network(ig, just_kiwi, color="life_stage_cohort", line_weight=0.4, label=NULL) + color_palette('Set2')
+
+plot_net(just_kiwi, distance = "bray", color = "life_stage_cohort", type="samples", laymeth = "svd")  + color_palette('Set2')
+
+
+
+```
+
+
+# Vegan
+
+# Load data into vegan-friendly format
+```{r}
+
+
+### OTU TABLE
+
+######## Using the OTU table from bacterial_dataset after filtering.
+bac_otu_vegan <- as.data.frame(otu_table(bacterial_dataset))
+bac_otu_vegan_t <- t(bac_otu_vegan)
+
+
+
+### SAMPLE DATA
+
+######### Reads in sample data as a data frame
+sampledata_kiwi <- data.frame(read_csv("data/final/combined_sample_data_caps1.csv", show_col_types = F))
+######### Changes first column values to the same values under column 'submit form code'
+row.names(sampledata_kiwi) <- sampledata_kiwi$submit_form_code
+
+
+### Join OTU table and SAMPLE DATA by row.name
+de <- merge(sampledata_kiwi, bac_otu_vegan_t, by=0, all=F)
+
+
+
+### Filter to only control and treatment
+de.cohort <- filter(de, cohort_actual == "Control" | cohort_actual == "Treatment")
+### create abundance table
+abund = de.cohort[,120:ncol(de.cohort)]
+### Create metadata table
+meta = de.cohort[,1:118]
+
+
+### Filter to only swabs
+de.swabs <- filter(de, what == "environmental_swab")
+
+### Filter to only soils and substrates
+de.soils_substrates <- filter(de, what == "environmental_soil")
+
+### Filter to only control and treatment - Runs
+de.cohort_runs <- filter(de, life_stage_cohort == "Control - Runs" | life_stage_cohort == "Treatment - Runs")
+
+
+### create abundance table for control and treatment
+abund = de.cohort[,120:ncol(de.cohort)]
+abund <- as.matrix(abund)
+class(abund) <- "numeric"
+
+### create abundance table for control and treatment - Runs
+abund.runs = de.cohort_runs[,120:ncol(de.cohort_runs)]
+abund.runs <- as.matrix(abund.runs)
+class(abund.runs) <- "numeric"
+
+### create abundance table for swabs
+abund.swabs = de.swabs[,120:ncol(de.swabs)]
+abund.swabs <- as.matrix(abund.swabs)
+class(abund.swabs) <- "numeric"
+
+### create abundance table for soils
+abund.soils = de.soils_substrates[,120:ncol(de.soils_substrates)]
+abund.soils <- as.matrix(abund.soils)
+class(abund.soils) <- "numeric"
+
+### Create metadata table
+meta = de.cohort[,1:118]
+meta.runs = de.cohort_runs [,1:118]
+meta.swabs = de.swabs[,1:118]
+meta.soils = de.soils_substrates[,1:118]
+
+```
+
+# Clamtest
+```{r}
+
+### Clamtest
+abund <- as.matrix(abund)
+class(abund) <- "numeric"
+abund.no.zeros <- abund@.Data[, colSums(abund@.Data != 0) > 0]
+
+sol <- (with(meta, clamtest(abund.no.zeros, cohort_actual == "Control", alpha = 0.005)))
+
+summary(sol)
+head(sol)
+
+
+plot(sol)
+plot(sol, "Treatment OTU Abundances", "Control OTU Abundances", "Fungal Species Classification", pch = c(19,19,19,19),
+     col.points = c("pink","#bf812d","#5ab4ac","grey"),cex = 1.5, las = 1,   
+     col.lines = c("#bf812d","#5ab4ac","grey"), lty = c(2,2,2), lwd = 3, position = NULL)
+legend("bottomright", inset=c(-0.135,0.00),legend = c("Rare", "Wild specialist", "Captive specialist", "Generalist"),
+       col = c("grey","#bf812d","#5ab4ac","pink"), pch = c(19,19,19,19), cex = 0.5)
+
+clam_kiwi_simple_df <- data.frame(OTUs = sol$Species, Control_OTU_abundance = sol$Total_TRUE,
+                                  Treatment_OTU_abundance = sol$Total_FALSE, Classes = sol$Classes)
+
+
+test <- ggplot(clam_kiwi_simple_df, aes(Control_OTU_abundance, Treatment_OTU_abundance, col = Classes)) +
+  geom_point() + scale_x_log10() + scale_y_log10() + theme(legend.position = "none")
+
+ggplotly(test)
+
+
+###### Save output to excel
+
+clamtest_output <- as.data.frame(sol)
+write.csv(clamtest_output, "clamtest_output.csv")
+
+ 
+```
+
+## SIMPER
+```{r}
+
+(sim_kiwi <- with(meta, simper(abund, cohort_actual)))
+summary_sim_kiwi  <- summary(sim_kiwi, ordered = T)
+summary_sim_kiwi
+
+
+#write.csv(tax_table(bacterial_dataset), "fungal taxa post filter.csv")
+
+
+simper_output <- data.frame(read_csv("fungi top 10 SIMPER outputs post filter4.csv", show_col_types = F))
+
+simper_output = simper_output[-c(11),]
+
+ggbarplot(simper_output, x = "Species", y = "Percentage", color = "Phylum", fill = "Phylum",
+ palette = c("#00AFBB", "#E7B800", "#FC4E07"),
+ position = position_dodge()) +
+    theme(axis.text.x = element_text(angle = -35, hjust = 0, vjust=0.5, size = 10))
+
+
+
+
+
+
+```
+
+Beta diversity - Control vs Treatment - All birds
+```{r}
+
+
+# Convert to data frame and transpose and calculate using betadiver 
+# betadiver is for presence/absence may need to try vegdist or dist 
+#data.beta.pa <- betadiver(as.data.frame(t(data.compo.beta)), "hk")             # presence/absence
+data.beta    <- vegdist(as.data.frame(abund), method = "bray")    # abundance
+
+# Calculate beta diversity using distances from above and matching to sample data
+data.dispersion <- with(meta, betadisper(data.beta, life_stage_cohort))
+
+# Permutation test
+permutest(data.dispersion, pairwise=T)
+anova(data.dispersion)
+TukeyHSD(data.dispersion)
+
+# Putting data in long form so ggplot can read
+distance.stage  <- data.frame(distance=data.dispersion$distances, location=meta$life_stage_cohort)
+
+#########
+
+a_my_comparisons <- list( c("Control", "Treatment"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns")) 
+newlocationorder <- c('<30', '<40', '<50', '<60', '<70', '<80', '<90', '<100', '<110', '<120', '<130', '<140', '<150', '<160')
+meta$age_bin <- reorder.factor(meta$age_bin, new.order=newlocationorder)
+
+#pdf(file="Plots/26.pdf")
+
+# Plotting in ggplot
+bird.beta <- ggplot(distance.stage, aes(x=meta$age_bin, y = distance, col = meta$age_bin)) + xlab("") +
+  # scale_color_manual(values = ) + ylab("Distance to Centroid") + 
+  geom_boxplot() +
+  geom_quasirandom(size=4) + theme_classic() +
+  stat_compare_means(method = "t.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args) +
+  theme(axis.text = element_text(size=18), axis.title = element_text(size=20), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none") 
+#+ scale_x_discrete(labels=c("FALSE" = "wild", "TRUE" = "captive")) 
+bird.beta
+
+#dev.off()
+ 
+ggplotly(bird.beta)
+
+
+
+
+```
+
+Beta diversity - Control vs Treatment
+```{r}
+
+
+# Convert to data frame and transpose and calculate using betadiver 
+# betadiver is for presence/absence may need to try vegdist or dist 
+#data.beta.pa <- betadiver(as.data.frame(t(data.compo.beta)), "hk")             # presence/absence
+data.beta    <- vegdist(as.data.frame(abund), method = "bray")    # abundance
+
+# Calculate beta diversity using distances from above and matching to sample data
+data.dispersion <- with(meta, betadisper(data.beta, cohort_actual))
+
+# Permutation test
+permutest(data.dispersion, pairwise=T)
+anova(data.dispersion)
+TukeyHSD(data.dispersion)
+
+# Putting data in long form so ggplot can read
+distance.stage  <- data.frame(distance=data.dispersion$distances, location=meta$cohort_actual)
+
+#########
+
+a_my_comparisons <- list( c("Control", "Treatment"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns")) 
+
+# Plotting in ggplot
+bird.beta <- ggplot(distance.stage, aes(x=location, y = distance, col = location)) + xlab("") +
+  # scale_color_manual(values = ) + ylab("Distance to Centroid") + 
+  geom_boxplot() + 
+  geom_quasirandom(size=4) + theme_classic() +
+  stat_compare_means(method = "t.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args) +
+  theme(axis.text = element_text(size=18), axis.title = element_text(size=20), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none") 
+#+ scale_x_discrete(labels=c("FALSE" = "wild", "TRUE" = "captive")) 
+bird.beta
+ 
+ggplotly(bird.beta)
+
+
+
+```
+
+Beta diversity - Control vs Treatment - Runs
+```{r}
+
+
+# Convert to data frame and transpose and calculate using betadiver 
+# betadiver is for presence/absence may need to try vegdist or dist 
+#data.beta.pa <- betadiver(as.data.frame(t(data.compo.beta)), "hk")             # presence/absence
+data.beta    <- vegdist(as.data.frame(abund.runs), method = "bray")    # abundance
+
+# Calculate beta diversity using distances from above and matching to sample data
+data.dispersion <- with(meta.runs, betadisper(data.beta, life_stage_cohort))
+
+# Permutation test
+permutest(data.dispersion, pairwise=T)
+anova(data.dispersion)
+TukeyHSD(data.dispersion)
+
+# Putting data in long form so ggplot can read
+distance.stage  <- data.frame(distance=data.dispersion$distances, location=meta.runs$life_stage_cohort)
+
+#########
+
+a_my_comparisons <- list( c("Control - Runs", "Treatment - Runs"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns")) 
+#pdf(file="Plots/24.pdf")
+
+# Plotting in ggplot
+bird.beta <- ggplot(distance.stage, aes(x=location, y = distance, col = location)) + xlab("") +
+  # scale_color_manual(values = ) + ylab("Distance to Centroid") + 
+  geom_boxplot() + 
+    geom_text(aes(label =meta.runs$bird_name), hjust = 2) +
+  geom_quasirandom(size=4) + theme_classic() +
+  #stat_compare_means(method = "t.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args) +
+  theme(axis.text = element_text(size=18), axis.title = element_text(size=20), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none") 
+#+ scale_x_discrete(labels=c("FALSE" = "wild", "TRUE" = "captive")) 
+bird.beta
+
+#dev.off()
+
+ggplotly(bird.beta)
+
+
+
+```
+
+Beta diversity - Control vs Treatment - Runs - Antifungals
+```{r}
+
+
+# Convert to data frame and transpose and calculate using betadiver 
+# betadiver is for presence/absence may need to try vegdist or dist 
+#data.beta.pa <- betadiver(as.data.frame(t(data.compo.beta)), "hk")             # presence/absence
+data.beta    <- vegdist(as.data.frame(abund.runs), method = "bray")    # abundance
+
+# Calculate beta diversity using distances from above and matching to sample data
+data.dispersion <- with(meta.runs, betadisper(data.beta, antifungal_history))
+
+# Permutation test
+permutest(data.dispersion, pairwise=T)
+anova(data.dispersion)
+TukeyHSD(data.dispersion)
+
+# Putting data in long form so ggplot can read
+distance.stage  <- data.frame(distance=data.dispersion$distances, location=meta.runs$antifungal_history)
+
+#########
+
+a_my_comparisons <- list( c("positive", "negative"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns")) 
+#pdf(file="Plots/30.pdf")
+
+# Plotting in ggplot
+bird.beta <- ggplot(distance.stage, aes(x=location, y = distance, col = location)) + xlab("") +
+  # scale_color_manual(values = ) + ylab("Distance to Centroid") + 
+  geom_boxplot() + 
+    #geom_text(aes(label =meta.runs$bird_name), hjust = 2) +
+  geom_quasirandom(size=4) + theme_classic() +
+  #stat_compare_means(method = "t.test", comparisons = a_my_comparisons, label = "p.format") +
+  theme(axis.text = element_text(size=18), axis.title = element_text(size=20), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none") 
+#+ scale_x_discrete(labels=c("FALSE" = "wild", "TRUE" = "captive")) 
+bird.beta
+
+#dev.off()
+
+ggplotly(bird.beta)
+
+
+
+```
+
+Beta diversity - Soils
+```{r}
+
+
+# Convert to data frame and transpose and calculate using betadiver 
+# betadiver is for presence/absence may need to try vegdist or dist 
+#data.beta.pa <- betadiver(as.data.frame(t(data.compo.beta)), "hk")             # presence/absence
+data.beta    <- vegdist(as.data.frame(abund.soils), method = "bray")    # abundance
+
+# Calculate beta diversity using distances from above and matching to sample data
+data.dispersion <- with(meta.soils, betadisper(data.beta, site))
+
+# Permutation test
+permutest(data.dispersion, pairwise=T)
+anova(data.dispersion)
+TukeyHSD(data.dispersion)
+
+
+
+# Putting data in long form so ggplot can read
+distance.stage  <- data.frame(distance=data.dispersion$distances, location=meta.soils$life_stage_cohort)
+
+#########
+
+a_my_comparisons <- list( c("Okarito soil", "Willowbank soil"))
+symnum.args = list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), symbols = c("****", "***", "**", "*", "ns"))
+
+#pdf(file="Plots/25.pdf")
+
+# Plotting in ggplot
+soil.beta <- ggplot(distance.stage, aes(x=location, y = distance, col = location)) + xlab("") +
+  # scale_color_manual(values = ) + ylab("Distance to Centroid") + 
+  geom_boxplot() + 
+  geom_quasirandom(size=4) + theme_classic() +
+ # stat_compare_means(method = "t.test", comparisons = a_my_comparisons, label = "p.signif", symnum.args = symnum.args) +
+  theme(axis.text = element_text(size=18), axis.title = element_text(size=20), 
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none") 
+#+ scale_x_discrete(labels=c("FALSE" = "wild", "TRUE" = "captive")) 
+soil.beta
+
+#dev.off()
+
+ggplotly(soil.beta)
+
+
+
+
+```
+
+
+## Preprocessing
+```{r}
+
+
+
+TopNOTUs <- names(sort(taxa_sums(bacterial_dataset), TRUE)[1:50]) 
+ent10   <- prune_taxa(TopNOTUs, bacterial_dataset)
+
+######## Remove Wild and Late
+no_wild <- as.vector(data.frame(sample_data(ent10))$life_stage_cohort)
+no_wild <- (!(no_wild%in%c("Control - Wild", "Control - Late")))
+no_wild[is.na(no_wild)]=FALSE
+gpsf <- prune_samples(no_wild, ent10)
+
+
+
+gpsfb = subset_taxa(gpsf, Phylum=="Basidiomycota")
+gpsfbg = tax_glom(gpsfb, "Order")
+gpsfbg  = transform_sample_counts(gpsfbg, function(x) x / sum(x) )
+
+title = "plot_bar; Basidiomycota-only"
+plot_bar(gpsfbg, "life_stage_cohort", "Abundance", "Order", title=title)
+
+
+
+
+
+TopNOTUs <- names(sort(taxa_sums(bacterial_dataset), TRUE)[1:1000]) 
+ent10   <- prune_taxa(TopNOTUs, bacterial_dataset)
+
+######## Remove Wild and Late
+no_wild <- as.vector(data.frame(sample_data(ent10))$life_stage_cohort)
+no_wild <- (!(no_wild%in%c("Control - Wild", "Control - Late")))
+no_wild[is.na(no_wild)]=FALSE
+gpsf <- prune_samples(no_wild, ent10)
+
+
+
+gpsfb = subset_taxa(gpsf, Phylum=="Chytridiomycota")
+gpsfbg = tax_glom(gpsfb, "Order")
+gpsfbg  = transform_sample_counts(gpsfbg, function(x) x / sum(x) )
+
+title = "plot_bar; Chytridiomycota-only"
+plot_bar(gpsfbg, "life_stage_cohort", "Abundance", "Order", title=title)
+
+
+
+
+TopNOTUs <- names(sort(taxa_sums(bacterial_dataset), TRUE)[1:50]) 
+ent10   <- prune_taxa(TopNOTUs, bacterial_dataset)
+
+######## Remove Wild and Late
+no_wild <- as.vector(data.frame(sample_data(ent10))$life_stage_cohort)
+no_wild <- (!(no_wild%in%c("Control - Wild", "Control - Late")))
+no_wild[is.na(no_wild)]=FALSE
+gpsf <- prune_samples(no_wild, ent10)
+
+
+
+
+gpsfb = subset_taxa(gpsf, Phylum=="Ascomycota")
+gpsfbg = tax_glom(gpsfb, "Order")
+gpsfbg  = transform_sample_counts(gpsfbg, function(x) x / sum(x) )
+
+title = "plot_bar; Ascomycota-only"
+plot_bar(gpsfbg, "life_stage_cohort", "Abundance", "Order", title=title)
+
+
+
+```
+
+# Statistics of read coverage across samples
+```{r}
+######## Stats
+max(sample_sums(bacterial_dataset))
+range(sample_sums(bacterial_dataset))
+sample_sums(bacterial_dataset)
+hist(sample_sums(bacterial_dataset), breaks = 100,col = "blue", main = "Sample Sequencing Depth")
+
+######## Stats
+max(sample_sums(poodata.bac))
+range(sample_sums(poodata.bac))
+sample_sums(poodata.bac)
+hist(sample_sums(poodata.bac), breaks = 100,col = "blue", main = "Sample Sequencing Depth - Faecal")
+
+
+######## Subset by soils and substrates
+soil <- as.vector(data.frame(sample_data(bacterial_dataset))$what)
+soil <- soil%in%c("environmental_soil", "environmental_swab", "environmental_substrate")
+soil[is.na(soil)]=FALSE
+soil.bac <- prune_samples(soil, bacterial_dataset)
+
+
+######## Stats
+max(sample_sums(soil.bac))
+range(sample_sums(soil.bac))
+sample_sums(soil.bac)
+hist(sample_sums(soil.bac), breaks = 100,col = "blue", main = "Sample Sequencing Depth - Soil")
+
+######## Library distribution, coloured by 'what'
+df = as.data.frame(sample_data(bacterial_dataset))
+df$LibrarySize = sample_sums(bacterial_dataset)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= what))+
+  geom_point()
+
+######## Library distribution, coloured by 'what'
+df = as.data.frame(sample_data(poodata.bac))
+df$LibrarySize = sample_sums(poodata.bac)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= life_stage_cohort))+
+  geom_point()
+
+######## Library distribution, coloured by 'what'
+df = as.data.frame(sample_data(soil.bac))
+df$LibrarySize = sample_sums(soil.bac)
+df = df[order(df$LibrarySize),]
+df$Index = seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, colour= site))+
+  geom_point()
+
+
+```

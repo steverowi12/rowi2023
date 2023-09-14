@@ -1,0 +1,419 @@
+
+
+
+################################################
+################################################
+
+Demultiplexing and cleanup of raw data
+
+################################################
+################################################
+
+Run the following script to demultiplex, filter and clean BACTERIA and FUNGI sequences. This will output a FASTA file for downstream use in RDP Classifier and MAFFT alignment, as well as a samplexOTU table (Referred to as OTU table in phyloseq).
+
+Note; the OTU table must be transposed before being used in R. This can be done manually or with t()
+
+## All work carried out in /nesi/nobackup/landcare02543/steve/combined_demultiplex_16S
+						   /nesi/nobackup/landcare02543/steve/combined_demultiplex_ITS
+
+
+# 16S
+########################################################################
+########################################################################
+############################### BACTERIA ###############################
+########################################################################
+########################################################################
+
+
+
+################ Demultiplex bacteria - order of the lane files matter!
+
+################ index1file, index2file, runname, primerfile, reverseprimerfile will be unique to a run
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clsplitseq --runname=rowi2021 --truncateN=enable --index1file=AG0699_rowi_i7.txt ---index2file=AG0699_rowi_i5.txt --primerfile=forward.primer.16S.txt --reverseprimerfile=reverse.primer.16S.txt --minqualtag=30 --numthreads=8 Undetermined_S0_L001_R1_001.fastq.gz Undetermined_S0_L001_I1_001.fastq.gz Undetermined_S0_L001_I2_001.fastq.gz Undetermined_S0_L001_R2_001.fastq.gz  Demultiplexed_16S
+
+
+################ Change directory file up
+
+	cd ..
+
+################ Change directory
+
+	cd ./Demultiplexed_16S
+
+
+
+################ Merging of paired-end reads with PEAR.
+
+	module load PEAR
+	for f in `ls *.forward.fastq.gz | grep -P -o '^[^\.]+'`; do temp=(`echo $f|grep -P -o '[^\__]+___L001'`); pear -p 0.001 -u 0 -j 32 -f $f.forward.fastq.gz -r $f.reverse.fastq.gz -o $f; done
+
+
+
+################ Filtering of merged reads.
+
+# minumum quality = 30
+# minimum length = 150
+
+	for f in `ls *.assembled.fastq | grep -o -P '^[^\.]+'`
+	do /nesi/project/landcare02543/modules/claident_new/bin/clfilterseq --minqual=30 --minlen=150 --maxplowqual=0.1 --numthreads=8 $f.assembled.fastq $f.filtered.fastq
+	done
+
+
+################ Detection/removal of noisy reads using VSEARCH.
+
+	module load VSEARCH
+	for f in `ls *filtered.fastq | grep -o -P '^[^\.]+'`
+	do /nesi/project/landcare02543/modules/claident_new/bin/clcleanseqv --derepmode=FULLLENGTH --primarymaxnmismatch=0 --secondarymaxnmismatch=1 --pnoisycluster=0.5 --numthreads=8 $f.filtered.fastq clcleanseqv.$f
+	done
+
+################ Clustering with VSEARCH.
+
+	module load VSEARCH
+	/nesi/project/landcare02543/modules/claident_new/bin/clclassseqv --minident=0.97 --numthreads=8 clcleanseqv.*/primarycluster.denoised.fasta.gz clclassseqv.16S
+
+	##### Output Results #####
+
+	76370092 nt in 301912 seqs, min 151, max 437, avg 253
+	Sorting by abundance 100%
+	Counting k-mers 100% 
+	Clustering 100%  
+	Sorting clusters 100%
+	Writing clusters 100% 
+	Clusters: 13424 Size min 2, max 466078, avg 22.5
+	Singletons: 0, 0.0% of seqs, 0.0% of clusters
+
+
+################ Mapping of raw reads that were removed in the previous noisy-read detection process but are mapped to the clustered OTUs with a given cutoff similarity.
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clrecoverseqv --minident=0.97 --centroid=clclassseqv.16S/clustered.fasta --numthreads=8 clcleanseqv.*/primarycluster.fasta.gz clrecoverseqv.16S
+
+	##### Output Results #####
+
+	3396450 nt in 13424 seqs, min 151, max 437, avg 253
+	Counting k-mers 100% 
+	Creating k-mer index 100% 
+	Searching 100%  
+	Matching unique query sequences: 2011289 of 2329348 (86.35%)
+
+
+################ Change directory
+
+	cd ./clrecoverseqv.16S
+
+################ De-novo chimera removal with VSEARCH. 
+
+	vsearch  --uchime_denovo clustered.fasta --nonchimeras otus_nonchimeras.fasta --chimeras otus_chimera.fasta --uchimeout otus_chimeras.uc --threads 4 --sizein --sizeout --fasta_width 0 --log chimera.log 
+
+	##### Output Results #####
+
+	Reading file clustered.fasta 100%  
+	3396450 nt in 13424 seqs, min 151, max 437, avg 253
+	Masking 100% 
+	Sorting by abundance 100%
+	Counting k-mers 100% 
+	Detecting chimeras 100%  
+	Found 0 (0.0%) chimeras, 13424 (100.0%) non-chimeras,
+	and 0 (0.0%) borderline sequences in 13424 unique sequences.
+	Taking abundance information into account, this corresponds to
+	0 (0.0%) chimeras, 13424 (100.0%) non-chimeras,
+	and 0 (0.0%) borderline sequences in 13424 total sequences.
+
+
+################ Generating a sample x OTU summary table. Only the OTUs that appear in the above otus_nonchimeras.fasta file will appear in the summary matrix.
+
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clsumclass clustered.otu.gz summary.16S.txt
+
+____________________________________________________________________________________
+
+################ save the otus_nonchimeras.fasta as "combined_bacteria_taxa.fasta"
+
+################ save the summry.16S.txt as "combined_bacteria_otu_table"
+
+____________________________________________________________________________________
+
+#ITS
+########################################################################
+########################################################################
+################################# FUNGI ################################
+########################################################################
+########################################################################
+
+
+################ Demultiplex fungi - order of the lane files matter!
+
+################ index1file, index2file, runname, primerfile, reverseprimerfile will be unique to a run
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clsplitseq --runname=rowifungi2021 --truncateN=enable --index1file=AG0699_rowi_i7.txt --index2file=AG0699_rowi_i5.txt --primerfile=forward.primer.ITS1F.txt --reverseprimerfile=reverse.primer.ITS2.txt --minqualtag=30 --numthreads=8 Undetermined_S0_L001_R1_001.fastq.gz Undetermined_S0_L001_I1_001.fastq.gz Undetermined_S0_L001_I2_001.fastq.gz Undetermined_S0_L001_R2_001.fastq.gz Demultiplexed_ITS
+
+
+################ Change directory file up
+	
+	cd ..
+
+
+################ Change directory 
+
+	cd ./Demultiplexed_ITS
+
+
+################ Merging of paired-end reads with PEAR.
+
+	module load PEAR
+	for f in `ls *ITS1F.forward.fastq.gz | grep -o -P '^[^\.]+'`
+	do pear -f $f.forward.fastq.gz -r $f.reverse.fastq.gz -o $f -p 0.0001 -u 0.01 -j 8
+	done
+
+
+################ Filtering of merged reads.
+
+	for f in `ls *ITS1F.assembled.fastq | grep -o -P '^[^\.]+'`
+	do /nesi/project/landcare02543/modules/claident_new/bin/clfilterseq --minqual=30 --minlen=150 --maxplowqual=0.1 --numthreads=8 $f.assembled.fastq filtfungi$f.filtered.fastq
+	done
+
+
+################ Detection/removal of noisy reads.
+
+	module load VSEARCH
+	for f in `ls *filtered.fastq | grep -o -P '^[^\.]+'`
+	do /nesi/project/landcare02543/modules/claident_new/bin/clcleanseqv --derepmode=FULLLENGTH --primarymaxnmismatch=0 --secondarymaxnmismatch=1 --pnoisycluster=0.5 --numthreads=8 $f.filtered.fastq clcleanseqv.$f
+	done
+
+
+################ Clustering with VSEARCH.
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clclassseqv --minident=0.97 --numthreads=8 clcleanseqv.*/primarycluster.denoised.fasta.gz clclassseqv.ITS
+
+	##### Output Results #####
+
+	42411558 nt in 169665 seqs, min 150, max 442, avg 250
+	Sorting by abundance 100%
+	Counting k-mers 100% 
+	Clustering 100%  
+	Sorting clusters 100%
+	Writing clusters 100% 
+	Clusters: 4968 Size min 1, max 66703, avg 34.2
+	Singletons: 2141, 1.3% of seqs, 43.1% of clusters
+
+
+
+################ Mapping of raw reads that were removed in the previous noisy-read detection process but are mapped to the clustered OTUs with a given cutoff similarity.
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clrecoverseqv --minident=0.97 --centroid=clclassseqv.ITS/clustered.fasta --numthreads=8 clcleanseqv.*/primarycluster.fasta.gz clrecoverseqv.ITS
+
+	##### Output Results #####
+	
+	1210531 nt in 4968 seqs, min 150, max 442, avg 244
+	Counting k-mers 100% 
+	Creating k-mer index 100% 
+	Searching 100%  
+	Matching unique query sequences: 169664 of 169665 (100.00%)
+
+
+################ Change directory
+
+	cd ./clrecoverseqv.ITS
+
+
+################ De-novo chimera removal with VSEARCH.
+
+	vsearch  --uchime_denovo clustered.fasta --nonchimeras otus_nonchimeras.fasta --chimeras otus_chimera.fasta --uchimeout otus_chimeras.uc --threads 4 --sizein --sizeout --fasta_width 0 --log chimera.log 
+
+	##### Output Results #####
+	
+	Reading file clustered.fasta 100%  
+	1210531 nt in 4968 seqs, min 150, max 442, avg 244
+	Masking 100% 
+	Sorting by abundance 100%
+	Counting k-mers 100% 
+	Detecting chimeras 100%  
+	Found 0 (0.0%) chimeras, 4968 (100.0%) non-chimeras,
+	and 0 (0.0%) borderline sequences in 4968 unique sequences.
+	Taking abundance information into account, this corresponds to
+	0 (0.0%) chimeras, 4968 (100.0%) non-chimeras,
+	and 0 (0.0%) borderline sequences in 4968 total sequences.
+
+
+################ Generating a sample x OTU summary table. Only the OTUs that appear in the above otus_nonchimeras.fasta file will appear in the summary matrix.
+
+	/nesi/project/landcare02543/modules/claident_new/bin/clsumclass clustered.otu.gz summary.ITS.txt
+
+
+____________________________________________________________________________________
+
+################ save the otus_nonchimeras.fasta as "combined_fungi_taxa.fasta"
+
+################ save the summry.16S.txt as "combined_fungi_otu_table"
+
+____________________________________________________________________________________
+
+
+
+################################################
+################################################
+
+RDP Classifier
+
+################################################
+################################################
+
+Now that we have the FASTA file and OTU summary file for both BACTERIA and FUNGI, we need to present the FASTA file to RDP Classifier for a TAX table output.
+
+To do this, either use the web-based option for RDP Classifier, or download and install the Javascript program from https://sourceforge.net/projects/rdp-classifier/
+
+In order to run RDP Classifier from Windows Command Prompt, follow the below instructions:
+
+1. Copy both FASTA files into the directory in which RDP Classifier has been unzipped to, i.e Downloads/rdp_classifier_2.13/rdp_classifier_2.13
+
+################ Command line input
+
+# Open Windows Command Line
+
+# Use the instructions found at https://github.com/rdpstaff/classifier
+
+
+################ For Bacteria
+
+ 	java -Xmx800m -jar Filepath\rdp_classifier_2.13\rdp_classifier_2.13\dist\classifier.jar classify -c 0.5 -f fixrank -g 16srrna -o fixrank_bacteria.txt combined_bacteria_taxa.fasta
+
+################ For Fungi
+
+	java -Xmx800m -jar Filepath\rdp_classifier_2.13\rdp_classifier_2.13\dist\classifier.jar classify -c 0.5 -f fixrank -g fungalits_unite -o fixrank_fungi.txt combined_fungi_taxa.fasta
+
+
+
+
+################################################
+################################################
+
+Taxonomy table preparation
+
+################################################
+################################################
+
+Both bacteria and fungi taxonomy files will be present in the same folder as rdp_classifier_2.13. Insert a new row above the data, and name each column according to its relevant grouping (i.e domain, phylum, etc). The Fixedrank output should only have the major groupings, no subs. Delete columns that contain percentages or superfluous data. 
+
+Rename the TAX tables as:
+
+combined_bacteria_tax_table.csv
+combined_fungi_tax_table.csv
+
+Move them to separate folders for use in two different RStudio projects (working directories)
+
+
+
+
+################################################
+################################################
+
+MAFFT Alignment and FASTA file manipulation
+
+################################################
+################################################
+
+We now have an samplexOTU table for both bacteria and fungi, as well as a TAX table for both bacteria and fungi. In order to generate a phylogenetic tree using phangorn in R, we will need the FASTA files (combined_fungi_taxa and combined_bacteria_taxa) to be aligned (separately, not together!) using MAFFT.
+
+Upload each file to MAFFT and align them using default parameters. Download the output FASTA files and name them:
+
+combined_bacteria_taxa_aligned.fasta
+combined_fungi_taxa_aligned.fasta
+
+These files can then be edited on the NeSI platform (or in Linux) using the steps below to edit OTU names, change gaps to "N"s and remove wrapping. Trimming should not be necessary - all aligned sequences in the FASTA file output from MAFFT should have the same length. If not, use the trim sequences option:
+
+
+########## FASTA file manipulations
+
+Run FASTA file through MAFFT for alignment
+Open in Notepad, replace "-" with "N"
+
+Upload to NeSI or open in Linux Terminal
+
+########## change headers to "OTU1, OTU2", etc
+#awk '/^>/{print ">OTU" ++i; next}{print}' < file.fasta > renamed_file.fasta
+
+########## remove sequence wrapping
+#sed -e 's/\(^>.*$\)/#\1#/' file.fasta | tr -d "\r" | tr -d "\n" | sed -e 's/$/#/' | tr "#" "\n" | sed -e '/^$/d' > unwrapped_file.fasta
+
+########## trim sequences in NEsI
+#module load FASTX-Toolkit
+#fastx_trimmer [-f 1] [-l 1000] [-i file.fasta] [-o file_trimmed.fasta]
+
+
+########## Final names of FASTA files
+
+combined_bacteria_taxa_final
+combined_fungi_taxa_final
+
+
+
+################################################
+################################################
+
+Phyloseq object checklist
+
+################################################
+################################################
+
+Now we should have:
+
+For BACTERIA:
+	
+	A sample data sheet
+	An aligned FASTA output with OTUs labelled numerically and sequences on single lines (no wrapping).
+	A samplexOTU table with samplenames that match the sample data sheet
+	A TAX table that should match the OTUs on the samplexOTU table and that has been edited to show only relevant groupings
+
+For FUNGI:
+	
+	A sample data sheet (same as above)
+	An aligned FASTA output with OTUs labelled numerically and sequences on single lines (no wrapping).
+	A samplexOTU table with samplenames that match the sample data sheet
+	A TAX table that should match the OTUs on the samplexOTU table and that has been edited to show only relevant groupings
+
+
+These objects can be loaded into phyloseq in RStudio to become the following:
+
+	SAM_data
+	phy_tree
+	OTU_table
+	TAX_table
+
+
+
+################################################
+################################################
+
+RStudio setup and script for analysis
+
+################################################
+################################################
+
+
+Create two separate projects and a new RMarkdown file for each.
+
+Set the working directory to one of these files, depending on if you are working on BACTERIA or FUNGI
+
+File layout:
+
+BACTERIA
+
+working directory
+	data
+		final/sample data sheet
+		raw/otu table
+		   /tax table
+aligned FASTA output (for tree generation)
+
+FUNGI
+
+working directory
+	data
+		final/sample data sheet
+		raw/otu table
+		   /tax table
+aligned FASTA output (for tree generation)
+
+
+
+
